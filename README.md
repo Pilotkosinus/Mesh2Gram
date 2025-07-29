@@ -64,7 +64,7 @@ TELEGRAM_TOKEN = 'DEIN_BOT_TOKEN'     # Token von @BotFather (Schritt 1)
 TELEGRAM_CHAT_ID = ''                 # Wird automatisch ermittelt
 
 # Meshtastic-Kanal konfigurieren (wichtig!)
-CHANNEL_NAME = 'Kohlemesh'            # Name des Kanals in der Meshtastic-App
+CHANNEL_NAME = 'Meinmesh'            # Name des Kanals in der Meshtastic-App
 CHANNEL_INDEX = 1                     # Index des Kanals (meist 1, siehe App)
 ```
 
