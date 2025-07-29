@@ -1,0 +1,26 @@
+# Meshtastic ↔ Telegram Gateway Requirements
+# Hauptabhängigkeiten für das Gateway-System
+
+# Meshtastic-Kommunikation
+meshtastic>=2.3.0
+
+# Telegram Bot API
+python-telegram-bot>=20.0
+
+# PubSub für Meshtastic Events
+pypubsub>=4.0.3
+
+# HTTP-Client für API-Anfragen (Bitcoin-Preis, etc.)
+aiohttp>=3.8.0
+
+# JSON-Handling (normalerweise in Python eingebaut, aber für Klarheit)
+# json - eingebaut in Python
+
+# Datetime-Handling (eingebaut in Python)
+# datetime - eingebaut in Python
+
+# Async-Support (eingebaut in Python 3.7+)
+# asyncio - eingebaut in Python
+
+# Typing-Support (eingebaut in Python 3.5+)
+# typing - eingebaut in Python
