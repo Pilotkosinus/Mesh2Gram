@@ -18,14 +18,35 @@ from terminal_output import log_private_chat_secret_registered, log_private_chat
 private_chats_file = "private_chats.json"
 pending_secrets: Dict[str, dict] = {}  # Secret -> {meshtastic_node_id, timestamp}
 authenticated_users: Dict[str, dict] = {}  # Secret -> {meshtastic_node_id, telegram_chat_id, meshtastic_name, telegram_name}
-telegram_bot = Bot(token=TELEGRAM_TOKEN)
+telegram_bot = None  # Wird bei Bedarf initialisiert
 bot_username = None  # Wird dynamisch beim Start ermittelt
+
+def get_telegram_bot():
+    """Gibt den Telegram Bot zurück, initialisiert ihn bei Bedarf"""
+    global telegram_bot
+    if telegram_bot is None:
+        # Direkt aus JSON-Datei lesen für aktuellste Konfiguration
+        import setup
+        config_data = setup.get_config()
+        
+        if config_data and config_data.get('telegram_token'):
+            token = config_data['telegram_token']
+        else:
+            # Fallback auf config.py
+            from config import TELEGRAM_TOKEN
+            token = TELEGRAM_TOKEN
+            
+        if not token or token.strip() == '':
+            raise ValueError("Telegram Token ist nicht konfiguriert!")
+        telegram_bot = Bot(token=token)
+    return telegram_bot
 
 async def get_bot_info():
     """Ruft Bot-Informationen ab und speichert den Username"""
     global bot_username
     try:
-        bot_info = await telegram_bot.get_me()
+        bot = get_telegram_bot()
+        bot_info = await bot.get_me()
         bot_username = f"@{bot_info.username}"
         print(f"[Private Chat] Bot-Username ermittelt: {bot_username}")
         return bot_username
@@ -92,10 +113,48 @@ def handle_telegram_id_command(update, context) -> bool:
     chat_type = update.effective_chat.type
     chat_title = getattr(update.effective_chat, 'title', 'Privater Chat')
     
-    if chat_type == 'private':
-        response = f"🆔 Chat-ID: `{chat_id}`\n💬 Typ: Privater Chat"
+    # Prüfe ob wir im Setup-Modus sind
+    import setup
+    config_data = setup.get_config()
+    
+    if config_data and config_data.get('chat_id_pending', False):
+        # Setup-Modus: Chat-ID automatisch übernehmen und Setup abschließen
+        if setup.complete_setup(chat_id):
+            if chat_type == 'private':
+                response = (f"✅ Setup abgeschlossen!\n\n"
+                           f"🆔 Chat-ID: `{chat_id}`\n"
+                           f"💬 Typ: Privater Chat\n\n"
+                           f"🔄 Das System wird neu gestartet...")
+            else:
+                response = (f"✅ Setup abgeschlossen!\n\n"
+                           f"🆔 Chat-ID: `{chat_id}`\n"
+                           f"💬 Typ: {chat_type}\n"
+                           f"📝 Name: {chat_title}\n\n"
+                           f"🔄 Das System wird neu gestartet...")
+            
+            asyncio.create_task(send_id_response_to_telegram(chat_id, response))
+            print(f"[Setup] Chat-ID {chat_id} automatisch übernommen - Setup abgeschlossen!")
+            
+            # System nach kurzer Verzögerung neu starten
+            async def restart_system():
+                await asyncio.sleep(3)  # Kurz warten damit die Nachricht ankommt
+                print("🔄 Setup abgeschlossen - System wird neu gestartet...")
+                import os
+                import sys
+                os.execv(sys.executable, ['python'] + sys.argv)
+            
+            asyncio.create_task(restart_system())
+            return True
+        else:
+            response = "❌ Fehler beim Abschließen des Setups!"
+            asyncio.create_task(send_id_response_to_telegram(chat_id, response))
+            return True
     else:
-        response = f"🆔 Chat-ID: `{chat_id}`\n💬 Typ: {chat_type}\n📝 Name: {chat_title}\n\n📋 Für config.py verwenden:\nTELEGRAM_CHAT_ID = '{chat_id}'"
+        # Normaler Modus: Nur Chat-ID anzeigen
+        if chat_type == 'private':
+            response = f"🆔 Chat-ID: `{chat_id}`\n💬 Typ: Privater Chat"
+        else:
+            response = f"🆔 Chat-ID: `{chat_id}`\n💬 Typ: {chat_type}\n📝 Name: {chat_title}\n\n📋 Für config.py verwenden:\nTELEGRAM_CHAT_ID = '{chat_id}'"
     
     asyncio.create_task(send_id_response_to_telegram(chat_id, response))
     print(f"[Private Chat] ID-Befehl in Chat {chat_id} ({chat_type}) verarbeitet")
@@ -233,7 +292,8 @@ async def handle_telegram_private_message(telegram_chat_id: int, telegram_userna
         
         # Bestätigung senden
         try:
-            await telegram_bot.send_message(
+            bot = get_telegram_bot()
+            await bot.send_message(
                 chat_id=telegram_chat_id,
                 text=f"✅ Privater Chat erfolgreich eingerichtet!\n"
                      f"Du bist jetzt mit dem Meshtastic-Benutzer '{pending_info['meshtastic_name']}' verbunden.\n"
@@ -260,7 +320,8 @@ async def handle_telegram_private_message(telegram_chat_id: int, telegram_userna
     
     # Nicht authentifiziert und kein gültiges Secret
     try:
-        await telegram_bot.send_message(
+        bot = get_telegram_bot()
+        await bot.send_message(
             chat_id=telegram_chat_id,
             text="🔒 Du bist nicht authentifiziert für private Chats.\n"
                  "Sende zuerst '!secret DEIN_SECRET' an den Bot über Meshtastic, "
@@ -318,11 +379,8 @@ async def handle_meshtastic_private_message(node_id: int, sender_name: str, text
 
 async def forward_telegram_to_meshtastic(secret: str, text: str, telegram_username: str):
     """Leitet Telegram-Nachricht an Meshtastic weiter"""
-    from message_handler import meshtastic_interface
-    
-    if not meshtastic_interface:
-        print("[Private Chat] Meshtastic Interface nicht verfügbar")
-        return
+    from message_handler import send_to_meshtastic_safe
+    import file_logger
     
     user_data = authenticated_users[secret]
     target_node_id = user_data['meshtastic_node_id']
@@ -330,73 +388,84 @@ async def forward_telegram_to_meshtastic(secret: str, text: str, telegram_userna
     try:
         # Private Nachricht an spezifische Node senden
         message = f"@{telegram_username}: {text}"
-        meshtastic_interface.sendText(message, destinationId=target_node_id)
-        print(f"[Private Chat] Telegram → Meshtastic: @{telegram_username} → {user_data['meshtastic_name']}")
-        log_private_message_telegram_to_meshtastic(telegram_username, user_data['meshtastic_name'])
+        success = await send_to_meshtastic_safe(message, target_node_id)
+        if success:
+            print(f"[Private Chat] Telegram → Meshtastic: @{telegram_username} → {user_data['meshtastic_name']}")
+            log_private_message_telegram_to_meshtastic(telegram_username, user_data['meshtastic_name'], text)
+        else:
+            error_msg = f"[Private Chat] Fehler beim Senden an Meshtastic: Verbindung nicht verfügbar"
+            print(error_msg)
+            file_logger.log_error(error_msg)
     except Exception as e:
-        print(f"[Private Chat] Fehler beim Senden an Meshtastic: {e}")
+        error_msg = f"[Private Chat] Fehler beim Senden an Meshtastic: {e}"
+        print(error_msg)
+        file_logger.log_error(error_msg)
 
 async def forward_telegram_group_to_meshtastic(secret: str, text: str, sender_username: str, authenticated_user_data: dict):
     """Leitet Telegram-Gruppen-Nachricht an Meshtastic weiter"""
-    from message_handler import meshtastic_interface
-    
-    if not meshtastic_interface:
-        print("[Private Chat] Meshtastic Interface nicht verfügbar")
-        return
+    from message_handler import send_to_meshtastic_safe
+    import file_logger
     
     target_node_id = authenticated_user_data['meshtastic_node_id']
     
     try:
         # Gruppen-Nachricht an spezifische Node senden mit Sender-Info
         message = f"[TG] @{sender_username}: {text}"
-        meshtastic_interface.sendText(message, destinationId=target_node_id)
-        print(f"[Private Chat] Telegram-Gruppe → Meshtastic: @{sender_username} → {authenticated_user_data['meshtastic_name']}")
-        log_private_message_telegram_to_meshtastic(f"{sender_username} (Gruppe)", authenticated_user_data['meshtastic_name'])
+        success = await send_to_meshtastic_safe(message, target_node_id)
+        if success:
+            print(f"[Private Chat] Telegram-Gruppe → Meshtastic: @{sender_username} → {authenticated_user_data['meshtastic_name']}")
+            log_private_message_telegram_to_meshtastic(f"{sender_username} (Gruppe)", authenticated_user_data['meshtastic_name'], text)
+        else:
+            error_msg = f"[Private Chat] Fehler beim Senden der Gruppen-Nachricht an Meshtastic: Verbindung nicht verfügbar"
+            print(error_msg)
+            file_logger.log_error(error_msg)
     except Exception as e:
-        print(f"[Private Chat] Fehler beim Senden der Gruppen-Nachricht an Meshtastic: {e}")
+        error_msg = f"[Private Chat] Fehler beim Senden der Gruppen-Nachricht an Meshtastic: {e}"
+        print(error_msg)
+        file_logger.log_error(error_msg)
 
 async def forward_meshtastic_to_telegram(secret: str, text: str, sender_name: str):
     """Leitet Meshtastic-Nachricht an Telegram weiter"""
+    import file_logger
+    
     user_data = authenticated_users[secret]
     telegram_chat_id = user_data['telegram_chat_id']
     
     try:
         message = f"<b>{sender_name}</b>: {text}"
-        await telegram_bot.send_message(
+        bot = get_telegram_bot()
+        await bot.send_message(
             chat_id=telegram_chat_id,
             text=message,
             parse_mode='HTML'
         )
         print(f"[Private Chat] Meshtastic → Telegram: {sender_name} → @{user_data['telegram_name']}")
-        log_private_message_meshtastic_to_telegram(sender_name, user_data['telegram_name'])
+        log_private_message_meshtastic_to_telegram(sender_name, user_data['telegram_name'], text)
     except Exception as e:
-        print(f"[Private Chat] Fehler beim Senden an Telegram: {e}")
+        error_msg = f"[Private Chat] Fehler beim Senden an Telegram: {e}"
+        print(error_msg)
+        file_logger.log_error(error_msg)
 
 async def send_help_message_to_meshtastic(node_id: int, sender_name: str):
     """Sendet eine Hilfe-Nachricht an einen nicht-authentifizierten Meshtastic-Benutzer"""
-    from message_handler import meshtastic_interface
-    
-    if not meshtastic_interface:
-        print("[Private Chat] Meshtastic Interface nicht verfügbar für Hilfe-Nachricht")
-        return
+    from message_handler import send_to_meshtastic_safe
     
     try:
         help_message = ("🔒 Private Chats verfügbar!\n"
                        "1. Sende: !secret DEINWORT\n"
                        f"2. Schreibe das gleiche Wort an {get_bot_mention()} in Telegram")
         
-        meshtastic_interface.sendText(help_message, destinationId=node_id)
-        print(f"[Private Chat] Hilfe-Nachricht an {sender_name} (Node {node_id}) gesendet")
+        success = await send_to_meshtastic_safe(help_message, node_id)
+        if success:
+            print(f"[Private Chat] Hilfe-Nachricht an {sender_name} (Node {node_id}) gesendet")
+        else:
+            print(f"[Private Chat] Fehler beim Senden der Hilfe-Nachricht: Verbindung nicht verfügbar")
     except Exception as e:
         print(f"[Private Chat] Fehler beim Senden der Hilfe-Nachricht: {e}")
 
 async def send_help_commands_to_meshtastic(node_id: int, sender_name: str):
     """Sendet die verfügbaren Befehle an den Benutzer"""
-    from message_handler import meshtastic_interface
-    
-    if not meshtastic_interface:
-        print("[Private Chat] Meshtastic Interface nicht verfügbar")
-        return
+    from message_handler import send_to_meshtastic_safe
     
     try:
         help_message = ("📋 Verfügbare Befehle:\n"
@@ -406,59 +475,59 @@ async def send_help_commands_to_meshtastic(node_id: int, sender_name: str):
                        "!help - Diese Hilfe anzeigen\n"
                        "!id - Chat-ID anzeigen (nur Telegram)")
         
-        meshtastic_interface.sendText(help_message, destinationId=node_id)
-        print(f"[Private Chat] Befehls-Hilfe an {sender_name} (Node {node_id}) gesendet")
+        success = await send_to_meshtastic_safe(help_message, node_id)
+        if success:
+            print(f"[Private Chat] Befehls-Hilfe an {sender_name} (Node {node_id}) gesendet")
+        else:
+            print(f"[Private Chat] Fehler beim Senden der Befehls-Hilfe: Verbindung nicht verfügbar")
     except Exception as e:
         print(f"[Private Chat] Fehler beim Senden der Befehls-Hilfe: {e}")
 
 async def send_deletion_confirmation_to_meshtastic(node_id: int, sender_name: str):
     """Bestätigt die Löschung der Authentifizierung"""
-    from message_handler import meshtastic_interface
-    
-    if not meshtastic_interface:
-        return
+    from message_handler import send_to_meshtastic_safe
     
     try:
         message = "✅ Privater Chat wurde gelöscht!"
-        meshtastic_interface.sendText(message, destinationId=node_id)
-        print(f"[Private Chat] Lösch-Bestätigung an {sender_name} (Node {node_id}) gesendet")
+        success = await send_to_meshtastic_safe(message, node_id)
+        if success:
+            print(f"[Private Chat] Löschbestätigung an {sender_name} (Node {node_id}) gesendet")
+        else:
+            print(f"[Private Chat] Fehler beim Senden der Löschbestätigung: Verbindung nicht verfügbar")
     except Exception as e:
-        print(f"[Private Chat] Fehler beim Senden der Lösch-Bestätigung: {e}")
+        print(f"[Private Chat] Fehler beim Senden der Löschbestätigung: {e}")
 
 async def send_no_auth_found_to_meshtastic(node_id: int, sender_name: str):
     """Informiert dass keine Authentifizierung gefunden wurde"""
-    from message_handler import meshtastic_interface
-    
-    if not meshtastic_interface:
-        return
+    from message_handler import send_to_meshtastic_safe
     
     try:
         message = "ℹ️ Kein privater Chat aktiv"
-        meshtastic_interface.sendText(message, destinationId=node_id)
-        print(f"[Private Chat] 'Keine Auth'-Nachricht an {sender_name} (Node {node_id}) gesendet")
+        success = await send_to_meshtastic_safe(message, node_id)
+        if success:
+            print(f"[Private Chat] 'Keine Auth'-Nachricht an {sender_name} (Node {node_id}) gesendet")
+        else:
+            print(f"[Private Chat] Fehler beim Senden der 'Keine Auth'-Nachricht: Verbindung nicht verfügbar")
     except Exception as e:
         print(f"[Private Chat] Fehler beim Senden der 'Keine Auth'-Nachricht: {e}")
 
 async def send_secret_too_short_to_meshtastic(node_id: int, sender_name: str):
     """Informiert dass das Secret zu kurz ist"""
-    from message_handler import meshtastic_interface
-    
-    if not meshtastic_interface:
-        return
+    from message_handler import send_to_meshtastic_safe
     
     try:
         message = "❌ Secret zu kurz! Min. 4 Zeichen"
-        meshtastic_interface.sendText(message, destinationId=node_id)
-        print(f"[Private Chat] 'Secret zu kurz'-Nachricht an {sender_name} (Node {node_id}) gesendet")
+        success = await send_to_meshtastic_safe(message, node_id)
+        if success:
+            print(f"[Private Chat] 'Secret zu kurz'-Nachricht an {sender_name} (Node {node_id}) gesendet")
+        else:
+            print(f"[Private Chat] Fehler beim Senden der 'Secret zu kurz'-Nachricht: Verbindung nicht verfügbar")
     except Exception as e:
         print(f"[Private Chat] Fehler beim Senden der 'Secret zu kurz'-Nachricht: {e}")
 
 async def send_invalid_command_help_to_meshtastic(node_id: int, sender_name: str, invalid_command: str):
     """Informiert über ungültigen Befehl und zeigt Hilfe"""
-    from message_handler import meshtastic_interface
-    
-    if not meshtastic_interface:
-        return
+    from message_handler import send_to_meshtastic_safe
     
     try:
         message = (f"❌ Ungültiger Befehl: {invalid_command}\n"
@@ -468,24 +537,27 @@ async def send_invalid_command_help_to_meshtastic(node_id: int, sender_name: str
                    f"!btc - Bitcoin-Preis\n"
                    f"!id - Chat-ID (nur Telegram)")
         
-        meshtastic_interface.sendText(message, destinationId=node_id)
-        print(f"[Private Chat] 'Ungültiger Befehl'-Hilfe an {sender_name} (Node {node_id}) gesendet")
+        success = await send_to_meshtastic_safe(message, node_id)
+        if success:
+            print(f"[Private Chat] 'Ungültiger Befehl'-Hilfe an {sender_name} (Node {node_id}) gesendet")
+        else:
+            print(f"[Private Chat] Fehler beim Senden der 'Ungültiger Befehl'-Hilfe: Verbindung nicht verfügbar")
     except Exception as e:
         print(f"[Private Chat] Fehler beim Senden der 'Ungültiger Befehl'-Hilfe: {e}")
 
 async def send_secret_confirmation_to_meshtastic(node_id: int, sender_name: str, secret: str):
     """Bestätigt den Empfang des Secrets und gibt Anweisungen"""
-    from message_handler import meshtastic_interface
-    
-    if not meshtastic_interface:
-        return
+    from message_handler import send_to_meshtastic_safe
     
     try:
         message = (f"✅ Secret '{secret}' empfangen!\n"
                    f"Jetzt schreibe '{secret}' an {get_bot_mention()} in Telegram")
         
-        meshtastic_interface.sendText(message, destinationId=node_id)
-        print(f"[Private Chat] Secret-Bestätigung an {sender_name} (Node {node_id}) gesendet")
+        success = await send_to_meshtastic_safe(message, node_id)
+        if success:
+            print(f"[Private Chat] Secret-Bestätigung an {sender_name} (Node {node_id}) gesendet")
+        else:
+            print(f"[Private Chat] Fehler beim Senden der Secret-Bestätigung: Verbindung nicht verfügbar")
     except Exception as e:
         print(f"[Private Chat] Fehler beim Senden der Secret-Bestätigung: {e}")
 
@@ -507,22 +579,23 @@ async def get_bitcoin_price() -> str:
 
 async def send_bitcoin_price_to_meshtastic(node_id: int, sender_name: str):
     """Sendet den aktuellen Bitcoin-Preis an den Meshtastic-Benutzer"""
-    from message_handler import meshtastic_interface
-    
-    if not meshtastic_interface:
-        return
+    from message_handler import send_to_meshtastic_safe
     
     try:
         price_message = await get_bitcoin_price()
-        meshtastic_interface.sendText(price_message, destinationId=node_id)
-        print(f"[Private Chat] Bitcoin-Preis an {sender_name} (Node {node_id}) gesendet: {price_message}")
+        success = await send_to_meshtastic_safe(price_message, node_id)
+        if success:
+            print(f"[Private Chat] Bitcoin-Preis an {sender_name} (Node {node_id}) gesendet: {price_message}")
+        else:
+            print(f"[Private Chat] Fehler beim Senden des Bitcoin-Preises: Verbindung nicht verfügbar")
     except Exception as e:
         print(f"[Private Chat] Fehler beim Senden des Bitcoin-Preises: {e}")
 
 async def send_id_response_to_telegram(chat_id: int, message: str):
     """Sendet die Chat-ID-Information an Telegram"""
     try:
-        await telegram_bot.send_message(
+        bot = get_telegram_bot()
+        await bot.send_message(
             chat_id=chat_id,
             text=message,
             parse_mode='Markdown'
