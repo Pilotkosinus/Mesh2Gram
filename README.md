@@ -15,7 +15,6 @@ meshgateway/
 ├── private_chat.py          # Private Chat Funktionalität mit Secret-Authentifizierung
 ├── terminal_output.py       # Terminal-Ausgaben und Logging mit Emoji-Support
 ├── file_logger.py           # Datei-basiertes Logging-System
-├── debug_private_chats.py   # Debug-Tool für Private Chat-Verbindungen
 ├── private_chats.json       # Gespeicherte private Chat-Verbindungen (wird automatisch erstellt)
 ├── requirements.txt         # Python-Abhängigkeiten
 ├── logs/                    # Log-Dateien (automatisch erstellt)
