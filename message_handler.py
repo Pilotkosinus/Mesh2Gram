@@ -7,6 +7,8 @@ Hier wird die gesamte Nachrichtenweiterleitung gehandhabt.
 import asyncio
 import meshtastic
 import meshtastic.tcp_interface
+import socket
+from datetime import datetime
 from pubsub import pub
 from telegram import Bot, Update
 from telegram.ext import Application, MessageHandler, filters
@@ -14,10 +16,133 @@ from telegram.ext import Application, MessageHandler, filters
 from config import *
 from terminal_output import *
 import private_chat
+import file_logger
 
 # Globale Variablen
-telegram_bot = Bot(token=TELEGRAM_TOKEN)
+telegram_bot = None  # Wird bei Bedarf initialisiert
 meshtastic_interface = None
+
+def get_telegram_bot():
+    """Gibt den Telegram Bot zurück, initialisiert ihn bei Bedarf"""
+    global telegram_bot
+    if telegram_bot is None:
+        # Direkt aus JSON-Datei lesen für aktuellste Konfiguration
+        import setup
+        config_data = setup.get_config()
+        
+        if config_data and config_data.get('telegram_token'):
+            token = config_data['telegram_token']
+        else:
+            # Fallback auf config.py
+            from config import TELEGRAM_TOKEN
+            token = TELEGRAM_TOKEN
+            
+        if not token or token.strip() == '':
+            raise ValueError("Telegram Token ist nicht konfiguriert!")
+        telegram_bot = Bot(token=token)
+    return telegram_bot
+
+async def send_to_meshtastic_safe(text, destination_id=None):
+    """Sichere Sendefunktion mit Fehlerbehandlung und Dashboard-Updates"""
+    if not meshtastic_interface:
+        log_meshtastic_unavailable()
+        # Dashboard über Verbindungsverlust informieren
+        import dashboard
+        dashboard.update_meshtastic_connection(False)
+        return False
+        
+    try:
+        if destination_id:
+            meshtastic_interface.sendText(text, destinationId=destination_id)
+        else:
+            meshtastic_interface.sendText(text, channelIndex=CHANNEL_INDEX)
+        return True
+    except (BrokenPipeError, ConnectionResetError, OSError) as e:
+        log_meshtastic_send_error(f"Verbindungsfehler beim Senden: {e}")
+        # Dashboard über Verbindungsverlust informieren
+        import dashboard
+        dashboard.update_meshtastic_connection(False)
+        return False
+    except Exception as e:
+        error_msg = str(e)
+        log_meshtastic_send_error(f"Unbekannter Fehler beim Senden: {error_msg}")
+        
+        # Bei Timeout-Fehlern Dashboard über Verbindungsverlust informieren
+        if "timed out" in error_msg.lower() or "timeout" in error_msg.lower():
+            import dashboard
+            dashboard.update_meshtastic_connection(False)
+            file_logger.log_warning("Meshtastic-Verbindung als unterbrochen markiert aufgrund von Timeout")
+        
+        return False
+
+async def check_meshtastic_connection():
+    """Prüft ob die Meshtastic-Verbindung noch aktiv ist (sanfter)"""
+    if not meshtastic_interface:
+        return False
+        
+    try:
+        # Erst prüfen ob das Interface noch existiert
+        if hasattr(meshtastic_interface, 'socket'):
+            # Für TCP Interface prüfen wir den Socket-Status weniger aggressiv
+            try:
+                sock = meshtastic_interface.socket
+                if sock is None:
+                    return False
+                    
+                # Einfacher Check ob Socket noch verbunden ist
+                sock.settimeout(0.5)  # Längerer Timeout
+                try:
+                    # Sanfter Test
+                    sock.getpeername()  # Wirft Exception wenn nicht verbunden
+                    return True
+                except (OSError, socket.error):
+                    return False
+                finally:
+                    sock.settimeout(None)
+            except (ConnectionResetError, BrokenPipeError, OSError, AttributeError):
+                return False
+        return True
+    except Exception:
+        return False
+
+async def ping_meshtastic_host(host, timeout=3):
+    """Überprüft ob der Meshtastic-Host im Netzwerk erreichbar ist UND der TCP-Port verfügbar ist"""
+    try:
+        # Versuche TCP-Verbindung zum Meshtastic TCP Port
+        future = asyncio.open_connection(host, 4403)  # Meshtastic TCP Port
+        try:
+            reader, writer = await asyncio.wait_for(future, timeout=timeout)
+            # Verbindung erfolgreich - sofort wieder schließen
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except:
+                pass  # Ignoriere Fehler beim Schließen
+            return True
+        except asyncio.TimeoutError:
+            return False
+        except (ConnectionRefusedError, OSError):
+            # Port nicht verfügbar oder Gerät noch nicht bereit
+            return False
+        except Exception:
+            return False
+    except Exception:
+        return False
+
+async def wait_for_device_ready(host, max_wait_time=30):
+    """Wartet bis das Gerät vollständig bereit ist"""
+    from terminal_output import get_timestamp
+    print(f"[{get_timestamp()}] [WAITING] Warte auf Gerät-Bereitschaft...")
+    
+    start_time = asyncio.get_event_loop().time()
+    while (asyncio.get_event_loop().time() - start_time) < max_wait_time:
+        if await ping_meshtastic_host(host, 2):
+            # Zusätzliche kurze Wartezeit für vollständige Bereitschaft
+            await asyncio.sleep(2)
+            return True
+        await asyncio.sleep(1)
+    
+    return False
 
 async def handle_telegram_message(update: Update, context):
     """Handler für eingehende Telegram-Nachrichten"""
@@ -68,6 +193,9 @@ async def handle_telegram_message(update: Update, context):
         )):
         return  # Private Chat-Nachricht wurde verarbeitet
     
+    # Text zuerst holen (wird für Setup-Modus benötigt)
+    text = update.message.text
+    
     # Prüfe ob es aus der konfigurierten Haupt-Chat-ID kommt (normaler Gruppenchat)
     if TELEGRAM_CHAT_ID and TELEGRAM_CHAT_ID.strip() != '':
         if str(update.effective_chat.id) != TELEGRAM_CHAT_ID:
@@ -75,8 +203,8 @@ async def handle_telegram_message(update: Update, context):
             return
     else:
         # Setup-Modus: Keine Chat-ID konfiguriert, nur !id Kommando erlauben
-        if text.lower().strip() == '!id':
-            await private_chat.handle_telegram_id_command(update.effective_chat.id, update)
+        if text and text.lower().strip() == '!id':
+            # !id wird bereits von handle_telegram_id_command verarbeitet
             return
         else:
             # In Setup-Modus andere Nachrichten ignorieren
@@ -85,8 +213,6 @@ async def handle_telegram_message(update: Update, context):
                 "Verwenden Sie !id um Ihre Chat-ID zu erhalten."
             )
             return
-    
-    text = update.message.text
     if not text:
         return
     
@@ -103,13 +229,13 @@ async def handle_telegram_message(update: Update, context):
     
     # Nachricht an Meshtastic senden
     try:
-        if meshtastic_interface:
-            # Nachricht mit Telegram-Username als Prefix
-            message = f"{sender_name}: {text}"
-            meshtastic_interface.sendText(message, channelIndex=CHANNEL_INDEX)
+        # Nachricht mit Telegram-Username als Prefix
+        message = f"{sender_name}: {text}"
+        success = await send_to_meshtastic_safe(message)
+        if success:
             log_message_telegram_to_meshtastic(sender_name, text)
         else:
-            log_meshtastic_unavailable()
+            log_telegram_send_error("Meshtastic-Verbindung nicht verfügbar")
     except Exception as e:
         log_meshtastic_send_error(e)
 
@@ -117,7 +243,7 @@ async def handle_text(packet, interface, target_channel_index):
     """Schickt den empfangenen Text asynchron an den Telegram-Channel,
     mit Prefix des Absender-Namens."""
     # Debug: Packet-Info anzeigen
-    print(f"[DEBUG] Empfangenes Packet: {packet}")
+    log_packet_debug(packet)
     
     # Text extrahieren
     text = packet.get('decoded', {}).get('text')
@@ -161,11 +287,15 @@ async def handle_text(packet, interface, target_channel_index):
                     sender_name = user_info['id']
                     break
 
+    # Dashboard-Update: Node-Aktivität registrieren
+    if node_id is not None:
+        log_node_activity(node_id, sender_name)
+
     # Prüfe ob es eine private Nachricht ist (to-Feld zeigt spezifische Node an)
     to_id = packet.get('to')
     is_broadcast = (to_id == 4294967295)  # 4294967295 = Broadcast an alle (^all)
     
-    print(f"[DEBUG] Von: {sender_name} (Node {node_id}), An: {to_id}, Broadcast: {is_broadcast}, Text: '{text}'")
+    log_message_filtering(sender_name, to_id, is_broadcast, text)
     
     if not is_broadcast:
         print(f"[DEBUG] Private Nachricht erkannt - verarbeite...")
@@ -217,7 +347,8 @@ async def handle_text(packet, interface, target_channel_index):
     # Senden
     try:
         if TELEGRAM_CHAT_ID and TELEGRAM_CHAT_ID.strip() != '':
-            await telegram_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode='HTML')
+            bot = get_telegram_bot()
+            await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode='HTML')
             log_message_meshtastic_to_telegram(sender_name, text)
         else:
             # Setup-Modus: Keine Weiterleitung an Telegram
@@ -225,59 +356,249 @@ async def handle_text(packet, interface, target_channel_index):
     except Exception as e:
         log_telegram_send_error(e)
 
-async def meshtastic_loop():
-    """Hauptschleife für Meshtastic-Verbindung"""
+async def reset_meshtastic_interface():
+    """Führt einen kompletten Reset der Meshtastic-Verbindung durch"""
     global meshtastic_interface
     
-    # 1) Verbinden
     try:
-        meshtastic_interface = meshtastic.tcp_interface.TCPInterface(hostname=MESHTASTIC_HOST)
-        log_meshtastic_connected(MESHTASTIC_HOST)
-    except Exception as e:
-        log_meshtastic_error(e)
-        return
-
-    # 2) Kanalindex auslesen (wenn verfügbar)
-    target_channel_index = CHANNEL_INDEX
-    try:
-        if hasattr(meshtastic_interface, 'localConfig') and hasattr(meshtastic_interface.localConfig, 'channels'):
-            for ch in meshtastic_interface.localConfig.channels:
-                if hasattr(ch, 'name') and ch.name == CHANNEL_NAME:
-                    target_channel_index = ch.index
-                    log_channel_found(CHANNEL_NAME, target_channel_index)
-                    break
-        else:
-            log_channel_default(CHANNEL_NAME)
-    except Exception as e:
-        log_channel_config_error()
-
-    # 3) Laufenden Event-Loop referenzieren
-    loop = asyncio.get_running_loop()
-
-    # 4) Callback: Paket in Async-Loop einspeisen
-    def on_receive(packet, interface):
-        loop.call_soon_threadsafe(
-            lambda: asyncio.create_task(handle_text(packet, interface, target_channel_index))
-        )
-
-    pub.subscribe(on_receive, 'meshtastic.receive.text')
-
-    # 5) Loop am Laufen halten
-    try:
-        while True:
-            await asyncio.sleep(1)
-    except asyncio.CancelledError:
-        pass
-    finally:
-        log_meshtastic_disconnecting()
+        file_logger.log_meshtastic_reset()
+        
+        # Interface schließen falls vorhanden
         if meshtastic_interface:
-            meshtastic_interface.close()
+            try:
+                meshtastic_interface.close()
+            except:
+                pass
             meshtastic_interface = None
+        
+        # Event-Subscriptions aufräumen
+        try:
+            pub.unsubscribe(None, 'meshtastic.receive.text')
+        except:
+            pass
+            
+        # Kurze Wartezeit für vollständige Bereinigung
+        await asyncio.sleep(2)
+        
+        file_logger.log_info("Meshtastic Interface komplett zurückgesetzt")
+        
+    except Exception as e:
+        file_logger.log_error("reset_meshtastic_interface", str(e))
+
+async def meshtastic_loop():
+    """Hauptschleife für Meshtastic-Verbindung mit stabiler Wiederverbindung"""
+    global meshtastic_interface
+    reconnect_delay = MESHTASTIC_RECONNECT_DELAY
+    max_reconnect_delay = MESHTASTIC_MAX_RECONNECT_DELAY
+    device_was_online = False
+    last_connection_attempt = 0
+    min_reconnect_interval = 3  # Mindestens 3 Sekunden zwischen Verbindungsversuchen
+    consecutive_failures = 0  # Zähler für aufeinanderfolgende Fehler
+    consecutive_timeouts = 0  # Spezifischer Zähler für Timeout-Fehler
+    max_consecutive_timeouts = 3  # Nach 3 aufeinanderfolgenden Timeouts: kompletter Reset
+    
+    while True:
+        try:
+            # Verhindere zu häufige Verbindungsversuche
+            now = asyncio.get_event_loop().time()
+            if now - last_connection_attempt < min_reconnect_interval:
+                await asyncio.sleep(min_reconnect_interval - (now - last_connection_attempt))
+            
+            last_connection_attempt = asyncio.get_event_loop().time()
+            
+            # Prüfe erst ob das Gerät im Netzwerk erreichbar ist und der TCP-Port verfügbar ist
+            if not await ping_meshtastic_host(MESHTASTIC_HOST, MESHTASTIC_PING_TIMEOUT):
+                if device_was_online:
+                    log_device_offline(MESHTASTIC_HOST)
+                    device_was_online = False
+                    consecutive_failures = 0  # Reset bei erkanntem Offline-Status
+                
+                # Warte und prüfe wieder
+                await asyncio.sleep(MESHTASTIC_NETWORK_CHECK_INTERVAL)
+                continue
+            
+            # Gerät ist im Netzwerk - aber warte auf vollständige Bereitschaft
+            if not device_was_online:
+                log_device_back_online(MESHTASTIC_HOST)
+                # Warte bis Gerät vollständig bereit ist
+                if not await wait_for_device_ready(MESHTASTIC_HOST, 30):
+                    log_meshtastic_error("Gerät antwortet nicht rechtzeitig")
+                    await asyncio.sleep(MESHTASTIC_NETWORK_CHECK_INTERVAL)
+                    continue
+                device_was_online = True
+            
+            # 1) Verbinden
+            log_meshtastic_connecting(MESHTASTIC_HOST)
+            try:
+                # Import von meshtastic (immer am Anfang)
+                import meshtastic
+                import meshtastic.tcp_interface
+                
+                # Prüfe auf zu viele aufeinanderfolgende Timeout-Fehler
+                if consecutive_timeouts >= max_consecutive_timeouts:
+                    from terminal_output import get_timestamp
+                    print(f"[{get_timestamp()}] [WARNING] {consecutive_timeouts} aufeinanderfolgende Timeout-Fehler erkannt!")
+                    print(f"[{get_timestamp()}] [INFO] Führe vollständigen Verbindungsreset durch (wie Neustart)...")
+                    file_logger.log_warning(f"Zu viele Timeout-Fehler ({consecutive_timeouts}) - vollständiger Reset")
+                    
+                    # Kompletten Interface-Reset durchführen
+                    await reset_meshtastic_interface()
+                    
+                    # Längere Wartezeit vor Reset
+                    await asyncio.sleep(10)
+                    
+                    # Alle Zähler zurücksetzen
+                    consecutive_timeouts = 0
+                    consecutive_failures = 0
+                    device_was_online = False
+                    
+                    # Module-Reload für kompletten Reset
+                    import importlib
+                    importlib.reload(meshtastic.tcp_interface)
+                    
+                    file_logger.log_info("Verbindungsreset abgeschlossen - versuche erneut zu verbinden")
+                
+                meshtastic_interface = meshtastic.tcp_interface.TCPInterface(hostname=MESHTASTIC_HOST)
+                log_meshtastic_connected(MESHTASTIC_HOST)
+                consecutive_failures = 0  # Reset bei erfolgreicher Verbindung
+                consecutive_timeouts = 0  # Reset bei erfolgreicher Verbindung
+                reconnect_delay = MESHTASTIC_RECONNECT_DELAY  # Reset delay
+            except Exception as e:
+                consecutive_failures += 1
+                error_msg = f"Verbindungsfehler: {e}"
+                log_meshtastic_error(error_msg)
+                
+                # Prüfe ob es ein Timeout-Fehler ist
+                if "Timed out waiting for connection completion" in str(e):
+                    consecutive_timeouts += 1
+                    file_logger.log_warning(f"Timeout-Fehler #{consecutive_timeouts} von max. {max_consecutive_timeouts}")
+                else:
+                    consecutive_timeouts = 0  # Reset bei anderen Fehlern
+                
+                # Bei wiederholten Fehlern länger warten
+                if consecutive_failures >= 3:
+                    from terminal_output import get_timestamp
+                    print(f"[{get_timestamp()}] [WARNING] {consecutive_failures} aufeinanderfolgende Fehler - längere Wartezeit")
+                    await asyncio.sleep(min(consecutive_failures * 2, 30))
+                
+                continue  # Neuer Versuch
+
+            # 2) Kanalindex auslesen
+            target_channel_index = CHANNEL_INDEX
+            try:
+                if hasattr(meshtastic_interface, 'localConfig') and hasattr(meshtastic_interface.localConfig, 'channels'):
+                    for ch in meshtastic_interface.localConfig.channels:
+                        if hasattr(ch, 'name') and ch.name == CHANNEL_NAME:
+                            target_channel_index = ch.index
+                            log_channel_found(CHANNEL_NAME, target_channel_index)
+                            break
+                else:
+                    log_channel_default(CHANNEL_NAME, CHANNEL_INDEX)
+            except Exception as e:
+                log_channel_config_error()
+
+            # 3) Event-Loop und Callback
+            loop = asyncio.get_running_loop()
+            
+            def on_receive(packet, interface):
+                loop.call_soon_threadsafe(
+                    lambda: asyncio.create_task(handle_text(packet, interface, target_channel_index))
+                )
+            
+            pub.subscribe(on_receive, 'meshtastic.receive.text')
+            
+            # 4) Moderatere Verbindungsüberwachung
+            last_heartbeat = asyncio.get_event_loop().time()
+            heartbeat_interval = MESHTASTIC_HEARTBEAT_INTERVAL
+            last_network_check = 0
+            
+            try:
+                while True:
+                    await asyncio.sleep(2)  # Moderatere Prüfung
+                    
+                    current_time = asyncio.get_event_loop().time()
+                    
+                    # Prüfe Verbindungsstatus alle X Sekunden
+                    if current_time - last_heartbeat >= heartbeat_interval:
+                        if not await check_meshtastic_connection():
+                            log_meshtastic_connection_lost()
+                            break  # Verbindung verloren, neu verbinden
+                        last_heartbeat = current_time
+                    
+                    # Zusätzlicher Netzwerk-Ping (weniger häufig)
+                    if current_time - last_network_check >= heartbeat_interval * 2:
+                        if not await ping_meshtastic_host(MESHTASTIC_HOST, MESHTASTIC_PING_TIMEOUT):
+                            log_device_offline(MESHTASTIC_HOST)
+                            device_was_online = False
+                            break  # Gerät nicht mehr im Netzwerk
+                        last_network_check = current_time
+                        
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                log_meshtastic_error(f"Unerwarteter Fehler: {e}")
+                break
+                
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            consecutive_failures += 1
+            log_meshtastic_error(f"Allgemeiner Fehler: {e}")
+            
+        finally:
+            # Cleanup - Saubere Bereinigung der Verbindung
+            try:
+                pub.unsubscribe(on_receive, 'meshtastic.receive.text')
+            except:
+                pass
+                
+            if meshtastic_interface:
+                try:
+                    meshtastic_interface.close()
+                except:
+                    pass
+                meshtastic_interface = None
+                
+            log_meshtastic_disconnected()
+            
+            # Bei zu vielen Timeout-Fehlern zusätzliches Cleanup
+            if consecutive_timeouts >= max_consecutive_timeouts - 1:
+                file_logger.log_info("Zusätzliches Cleanup nach Timeout-Fehlern")
+                await asyncio.sleep(3)  # Etwas länger warten
+            
+        # Intelligente Wiederverbindung mit adaptiver Wartezeit
+        if device_was_online or await ping_meshtastic_host(MESHTASTIC_HOST, MESHTASTIC_PING_TIMEOUT):
+            # Gerät ist online, aber mit angemessener Wartezeit besonders nach Fehlern
+            wait_time = max(MESHTASTIC_RECONNECT_DELAY, consecutive_failures)
+            log_meshtastic_reconnecting(wait_time)
+            await asyncio.sleep(wait_time)
+            reconnect_delay = MESHTASTIC_RECONNECT_DELAY
+        else:
+            # Gerät ist offline, längere Wartezeit mit exponential backoff
+            current_delay = min(reconnect_delay + consecutive_failures, max_reconnect_delay)
+            log_meshtastic_reconnecting(current_delay)
+            await asyncio.sleep(current_delay)
+            reconnect_delay = min(reconnect_delay * 1.3, max_reconnect_delay)
 
 async def run_telegram_bot():
     """Startet den Telegram-Bot"""
+    # Token aus aktueller Konfiguration holen
+    import setup
+    config_data = setup.get_config()
+    
+    if config_data and config_data.get('telegram_token'):
+        token = config_data['telegram_token']
+    else:
+        from config import TELEGRAM_TOKEN
+        token = TELEGRAM_TOKEN
+    
+    # Bot-Token validieren
+    if not token or token.strip() == '':
+        print("❌ Telegram Token ist nicht konfiguriert!")
+        return
+    
     # Application erstellen
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    application = Application.builder().token(token).build()
     
     # Message-Handler hinzufügen (alle Nachrichten, nicht nur Text)
     application.add_handler(MessageHandler(filters.ALL, handle_telegram_message))
