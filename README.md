@@ -1,19 +1,26 @@
 # Meshtastic ↔ Telegram Gateway 📡↔📱
 
-Ein vollständiges Gateway-System zur bidirektionalen Nachrichtenweiterleitung zwischen Meshtastic-Netzwerk und Telegram mit Features für Gruppen- und Privatchats.
+Ein vollständiges Gateway-System zur bidirektionalen Nachrichtenweiterleitung zwischen Meshtastic-Netzwerk und Telegram mit umfassenden Features für Gruppen- und Privatchats.
 
 ## 📁 Projektstruktur
 
 ```
 meshgateway/
-├── main.py              # Hauptprogramm - hier startest du das Gateway
-├── config.py            # Alle Konfigurationseinstellungen
-├── message_handler.py   # Nachrichtenweiterleitung zwischen Meshtastic und Telegram
-├── private_chat.py      # Private Chat Funktionalität mit Secret-Authentifizierung
-├── terminal_output.py   # Terminal-Ausgaben und Logging mit Emoji-Support
-├── private_chats.json   # Gespeicherte private Chat-Verbindungen (wird automatisch erstellt)
-├── requirements.txt     # Python-Abhängigkeiten
-└── README.md           # Diese Dokumentation
+├── main.py                  # Hauptprogramm - hier startest du das Gateway
+├── setup.py                 # Interaktiver Setup-Assistent für erste Konfiguration
+├── config.py                # Konfigurationsverwaltung (lädt gateway_config.json)
+├── dashboard.py             # Live-Dashboard mit Echtzeit-Statusanzeige
+├── gateway_config.json      # Automatisch generierte Konfigurationsdatei
+├── message_handler.py       # Nachrichtenweiterleitung zwischen Meshtastic und Telegram
+├── private_chat.py          # Private Chat Funktionalität mit Secret-Authentifizierung
+├── terminal_output.py       # Terminal-Ausgaben und Logging mit Emoji-Support
+├── file_logger.py           # Datei-basiertes Logging-System
+├── debug_private_chats.py   # Debug-Tool für Private Chat-Verbindungen
+├── private_chats.json       # Gespeicherte private Chat-Verbindungen (wird automatisch erstellt)
+├── requirements.txt         # Python-Abhängigkeiten
+├── logs/                    # Log-Dateien (automatisch erstellt)
+├── .venv/                   # Virtuelle Python-Umgebung (optional)
+└── README.md               # Diese Dokumentation
 ```
 
 ## 🚀 Schnellstart
@@ -56,16 +63,58 @@ cd meshgateway
 pip install -r requirements.txt
 ```
 
-### 3. Konfiguration
-Bearbeite `config.py` und trage deine Daten ein:
-```python
-MESHTASTIC_HOST = '192.168.178.32'    # IP deiner Meshtastic-Node
-TELEGRAM_TOKEN = 'DEIN_BOT_TOKEN'     # Token von @BotFather (Schritt 1)
-TELEGRAM_CHAT_ID = ''                 # Wird automatisch ermittelt
+### 3. Automatisches Setup 🚀
 
-# Meshtastic-Kanal konfigurieren (wichtig!)
-CHANNEL_NAME = 'Meinmesh'            # Name des Kanals in der Meshtastic-App
-CHANNEL_INDEX = 1                     # Index des Kanals (meist 1, siehe App)
+Das Gateway verfügt über einen **interaktiven Setup-Assistenten**, der Sie durch die komplette Konfiguration führt.
+
+**Ersten Start:**
+```bash
+python main.py
+```
+
+Das System erkennt automatisch, dass noch keine Konfiguration vorhanden ist und startet den **Setup-Wizard**:
+
+#### 📋 Setup-Schritte (automatisch geführt):
+
+**Schritt 1: Meshtastic Host**
+- Eingabe der IP-Adresse Ihres Meshtastic-Geräts
+- Automatische Verbindungstests auf Port 4403
+- Validierung der Erreichbarkeit
+
+**Schritt 2: Kanal-Konfiguration**
+- Eingabe des Kanal-Namens (z.B. "LongFast", "Secondary")
+- Eingabe des Kanal-Index (normalerweise 0-7)
+
+**Schritt 3: Telegram Bot Token**
+- Eingabe Ihres Bot-Tokens von @BotFather
+- Automatische Token-Validierung über Telegram API
+- Ermittlung des Bot-Namens
+
+**Schritt 4: Chat-ID Setup**
+- Automatischer Start des Bot-Systems
+- Anzeige der nächsten Schritte für Chat-ID-Ermittlung
+
+#### 🎯 Chat-ID automatisch ermitteln:
+
+Nach dem Setup-Wizard:
+1. **Bot zur Telegram-Gruppe hinzufügen**
+2. **`!id` in der Gruppe senden**
+3. **Chat-ID wird automatisch erkannt und gespeichert**
+4. **Setup ist abgeschlossen - Gateway startet automatisch**
+
+### 4. Konfigurationsdatei
+
+Das Setup erstellt automatisch eine `gateway_config.json` mit allen Einstellungen:
+```json
+{
+    "meshtastic_host": "192.168.1.100",
+    "channel_name": "LongFast", 
+    "channel_index": 0,
+    "telegram_token": "1234567890:ABCdef...",
+    "telegram_bot_name": "MeinBot",
+    "telegram_chat_id": "-1001234567890",
+    "setup_completed": true
+}
 ```
 
 **🔍 Kanal-Informationen finden:**
@@ -74,28 +123,19 @@ CHANNEL_INDEX = 1                     # Index des Kanals (meist 1, siehe App)
 3. Schaue dir die Kanal-Liste an:
    ```
    Kanal 0: Primary (LongFast)    ← Index 0, Name "Primary"
-   Kanal 1: Meinmash             ← Index 1, Name "Meinmash"
+   Kanal 1: Secondary             ← Index 1, Name "Secondary"
    Kanal 2: Testing               ← Index 2, Name "Testing"
    ```
-4. **Kopiere Name und Index** des gewünschten Kanals in die `config.py`
+4. **Verwende Name und Index** im Setup-Wizard
 
-### 4. Start
+### 5. Start nach Setup
 
-Das System startet automatisch im **Setup-Modus** wenn keine Chat-ID konfiguriert ist.
+Nach dem ersten Setup startet das Gateway normal:
+```bash
+python main.py
+```
 
-
-### 📱 Chat-ID automatisch ermitteln
-
-**Setup-Modus (empfohlen):**
-1. Starte das System ohne Chat-ID: `python main.py`
-2. Das System zeigt Setup-Hinweise an
-3. Sende `!id` an deinen Bot in Telegram
-4. Kopiere die erhaltene Chat-ID in `config.py`
-5. Starte neu
-
-**Manuell:**
-- In Gruppen: Füge den Bot hinzu und sende `!id`
-- In Privatachats: Starte Chat mit Bot und sende `!id`
+Das System lädt automatisch die gespeicherte Konfiguration und startet alle Services.
 
 ## 📋 Vollständige Feature-Liste
 
@@ -190,32 +230,82 @@ System-Antwort:
 - **Gruppen-Support**: Private Chats funktionieren auch aus Telegram-Gruppen
 - **Auto-Cleanup**: Alte, unvollständige Authentifizierungen werden automatisch gelöscht
 
-## 🖥️ Terminal-Ausgabe & Monitoring
+## 🖥️ Live-Dashboard & Monitoring
 
-### Emoji-Support
-Das System erkennt automatisch, ob dein Terminal Emojis darstellen kann:
-- **Mit Emojis**: `🚀 📱➡️📡 ✅ 🔒`
-- **Ohne Emojis**: `[START] [TG]->[MESH] [OK] [PRIVATE]`
+Das Gateway verfügt über ein **integriertes Live-Dashboard**, das eine vollständige Übersicht des Gateway-Status im Terminal anzeigt.
 
-### Live-Monitoring
-```
-[14:32:15] 🚀 Starte Meshtastic ↔ Telegram Gateway...
-[14:32:16] ✅ Mit Meshtastic-Node 192.168.178.22 verbunden
-[14:32:17] 📻 Kanal 'Kanalname' gefunden (Index 1)
-[14:32:18] 🤖 Telegram-Bot verbunden:  (@yourbotusername)
-[14:32:19] 🔄 Telegram Polling gestartet
-[14:32:45] 📱➡️📡 @andreas: Hallo vom Telegram!
-[14:33:12] 📡➡️📱 NodeUser: Antwort vom Mesh!
-[14:33:45] 🔒📱➡️📡 @user → MeshUser (Private Chat)
-```
+### � Dashboard-Features
 
-### Node-Status Updates
-Alle 3 Minuten (konfigurierbar) zeigt das System aktive Nodes:
+Das Dashboard zeigt in Echtzeit:
+
+#### **📈 Systemstatus**
+- **Aktuelle Zeit & Uptime**: Zeigt die laufende Betriebszeit an
+- **Host-Information**: IP-Adresse des Meshtastic-Geräts
+- **Verbindungsstatus**: Live-Status beider Verbindungen (Meshtastic ↔ Telegram)
+
+#### **� Verbindungsüberwachung**  
+- **Meshtastic-Verbindung**: Status, Verbindungsdauer, automatische Wiederverbindungsversuche
+- **Telegram-Bot**: Verbindungsstatus mit Bot-Namen
+- **Unterbrechungszähler**: Anzahl der Verbindungsabbrüche
+- **Letzte Unterbrechung**: Zeitpunkt der letzten Störung
+
+#### **📻 Kanal-Informationen**
+- **Kanal-Name**: Aktuell verwendeter Meshtastic-Kanal
+- **Kanal-Index**: Entsprechender Index in der Meshtastic-App
+
+#### **� Nachrichten-Statistiken**
+- **Telegram → Meshtastic**: Anzahl weitergeleiteter Nachrichten
+- **Meshtastic → Telegram**: Anzahl empfangener Nachrichten  
+- **Private Nachrichten**: Anzahl der privaten Chat-Nachrichten
+- **Letzte Nachricht**: Zeit, Absender und Inhalt der neuesten Nachricht
+
+#### **👥 Node-Aktivität**
+- **Letzte 10 aktive Nodes**: Liste der zuletzt aktiven Meshtastic-Teilnehmer
+- **Node-IDs**: Eindeutige Identifikation der Teilnehmer
+- **Zeitstempel**: Letzte Aktivität jedes Nodes
+
+### 🎨 Adaptive Darstellung
+
+Das Dashboard passt sich automatisch an die Terminal-Fähigkeiten an:
+- **Unicode-Support**: Schöne Box-Zeichen und Emojis (✅❌↔)
+- **ASCII-Fallback**: Kompatible Zeichen für ältere Terminals ([OK][X]<->)
+- **Automatische Breitenanpassung**: Optimale Darstellung in verschiedenen Terminal-Größen
+
+### 🔄 Live-Updates
+
+- **1-Sekunden-Updates**: Das Dashboard aktualisiert sich automatisch jede Sekunde
+- **Sofortige Statusänderungen**: Kritische Ereignisse (Verbindungsabbrüche) werden sofort angezeigt
+- **Robuste Fehlerbehandlung**: Dashboard läuft auch bei temporären Problemen weiter
+
+### 📱 Beispiel-Dashboard
 ```
-[14:35:00] 📊 Letzte 10 aktive Nodes:
-   1. Alice       (ID: 123456789) - zuletzt: 14:34:52
-   2. Bob         (ID: 987654321) - zuletzt: 14:34:28
-   3. Charlie     (ID: 456789123) - zuletzt: 14:33:15
+┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                        Mesh2Gram                                                        │
+│                                      MESHTASTIC ↔ TELEGRAM GATEWAY DASHBOARD                                       │
+├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ Zeit: 2025-08-02 14:32:45       Uptime: 02:15:32             Host: 192.168.1.100                                    │
+├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ Meshtastic: ✅ Verbunden          Dauer: 02:15:28                                                                    │
+│ Telegram:   ✅ Verbunden (MeinBot)        Unterbr.: 2                                                               │
+│ Letzte Unterbrechung: Vor 45 Minuten                                                                                 │
+├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ Kanal: 'LongFast' (Index: 0)                                                                                         │
+├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ Nachrichten Telegram → Meshtastic: 15                                                                                │
+│ Nachrichten Meshtastic → Telegram: 23                                                                                │
+│ Private Nachrichten:                8                                                                                │
+├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ Letzte Nachricht (14:32:12): NodeUser: Hallo aus dem Mesh!                                                          │
+├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ Letzte 10 aktive Nodes:                                                                                              │
+│   1. Alice       (ID: 123456789) - 14:31:45                                                                         │
+│   2. Bob         (ID: 987654321) - 14:30:22                                                                         │
+│   3. Charlie     (ID: 456789123) - 14:28:15                                                                         │
+│                                                                                                                       │
+│                                                vipe coded by Pilotkosinus with Claude Sonnet 4 Agent                │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+Strg+C zum Beenden
 ```
 
 ## 🛠️ Erweiterte Nutzung
@@ -244,39 +334,59 @@ Fehlerbehandlung: Graceful degradation
 ### Häufige Probleme
 
 **1. "Meshtastic-Interface nicht verfügbar"**
-- Prüfe IP-Adresse in `config.py`
+- Prüfe IP-Adresse in der Konfiguration (wird beim Setup getestet)
 - Stelle sicher, dass die Node erreichbar ist
 - Prüfe Netzwerkverbindung
 
 **2. "Telegram-Bot antwortet nicht"**
-- Prüfe Bot-Token in `config.py`
+- Prüfe Bot-Token (wird beim Setup validiert)
 - Stelle sicher, dass der Bot aktiv ist
 - Prüfe Internet-Verbindung
 
-**3. "Chat-ID Setup funktioniert nicht"**
-- Starte im Setup-Modus: `TELEGRAM_CHAT_ID = ''`
-- Sende `!id` an den Bot
-- Kopiere die **komplette** Chat-ID inklusive Minuszeichen
+**3. "Setup schlägt fehl"**
+- Starte das Setup erneut mit `python setup.py`
+- Prüfe alle Eingaben auf Tippfehler
+- Bei Netzwerkproblemen: Setup mit "Trotzdem verwenden" forcieren
 
-**4. "Private Chats funktionieren nicht"**
+**4. "Chat-ID Setup funktioniert nicht"**
+- Bot muss zur Telegram-Gruppe hinzugefügt werden
+- Sende `!id` in der Gruppe (nicht privat)
+- Warte auf automatische Erkennung
+
+**5. "Private Chats funktionieren nicht"**
 - Stelle sicher, dass Meshtastic-Nachrichten als **private** Nachrichten gesendet werden
 - Prüfe, ob das Secret korrekt eingegeben wurde
 - Secrets sind case-sensitive!
 
-**5. "Bot reagiert nicht auf Nachrichten in Gruppen"**
+**6. "Bot reagiert nicht auf Nachrichten in Gruppen"**
 - ⚠️ **HÄUFIGSTER FEHLER**: Privacy-Settings falsch konfiguriert
 - Gehe zu @BotFather → `/setprivacy` → deinen Bot wählen → `Disable`
 - Status muss sein: `DISABLED` (nicht ENABLED!)
 - Ohne diese Einstellung empfängt der Bot nur `/befehle` und @mentions
 
+**7. "Konfiguration ist verloren/beschädigt"**
+- Lösche `gateway_config.json`
+- Starte `python main.py` für neues Setup
+- Oder direkt `python setup.py` ausführen
+
 
 ### Debug-Modus
-```python
-# In config.py:
-LOG_LEVEL = 'DEBUG'
-```
+Für detaillierte Debug-Informationen können Sie das Log-Level in der `gateway_config.json` anpassen oder den Setup-Prozess wiederholen.
 
-Zeigt detaillierte Informationen über alle Operationen.
+### Manuelle Konfiguration
+Falls der Setup-Assistent nicht funktioniert, können Sie die `gateway_config.json` manuell erstellen:
+```json
+{
+    "meshtastic_host": "192.168.1.100",
+    "channel_name": "IhrKanalName",
+    "channel_index": 0,
+    "telegram_token": "IhrBotToken",
+    "telegram_bot_name": "IhrBotName",
+    "telegram_chat_id": "IhreChatID",
+    "setup_completed": true,
+    "chat_id_pending": false
+}
+```
 
 ### Datenverarbeitung
 - **Nachrichten**: Werden nicht dauerhaft gespeichert
@@ -286,14 +396,24 @@ Zeigt detaillierte Informationen über alle Operationen.
 
 ## 🔧 Modularer Aufbau & Anpassungen
 
-### Dateistruktur
+### Modularer Aufbau
 ```
-main.py              → Orchestrierung, Setup-Logik, Async-Koordination
-config.py            → Zentrale Konfiguration, alle Einstellungen
+main.py              → Orchestrierung, Setup-Integration, Async-Koordination
+setup.py             → Interaktiver Setup-Assistent mit Validierung und Tests
+config.py            → Dynamische Konfigurationsverwaltung (JSON-basiert)
+dashboard.py         → Live-Dashboard mit Echtzeit-Statusanzeige und Monitoring
+gateway_config.json  → Zentrale Konfigurationsdatei (automatisch generiert)
 message_handler.py   → Gruppenchat-Logik, Meshtastic ↔ Telegram Bridge
 private_chat.py      → Private Chat-System, Secret-Authentifizierung, Bitcoin-API
-terminal_output.py   → Logging, Emoji-Support, Node-Status-Tracking
+terminal_output.py   → Console-Logging, Emoji-Support, Node-Status-Tracking
+file_logger.py       → Datei-basiertes Logging mit Rotation
+debug_private_chats.py → Debug-Tool für Private Chat-Diagnose
 ```
+
+### Anpassungen
+- **Setup wiederholen**: `python setup.py`
+- **Konfiguration bearbeiten**: `gateway_config.json` editieren
+- **Reset**: `gateway_config.json` löschen und neu starten
 
 ## 📚 Dependencies
 
@@ -307,4 +427,3 @@ aiohttp>=3.8.0              # HTTP-Client für APIs
 
 
 **💡 Tipp**: Für Fragen und Support siehe die Terminal-Ausgabe - sie zeigt alle wichtigen Informationen in Echtzeit!
-
